@@ -3356,6 +3356,18 @@ void btm_sec_encrypt_change(uint16_t handle, tHCI_STATUS status, uint8_t encr_en
     if (encr_enable == HCI_ENCRYPT_MODE_ON) {
       encryption_algo =
               (transport == BT_TRANSPORT_LE) ? EncryptionAlgorithm::AES : EncryptionAlgorithm::E0;
+
+      // Claiming HCI_ENCRYPT_MODE_ON while using BR/EDR transport implies using E0 encryption.
+      // If the stored properties indicate that we should be using AES-CCM (i.e. that we were using
+      // Secure Connections mode previously), then this is a downgrade.
+      if (transport == BT_TRANSPORT_BR_EDR) {
+        if (btm_sec_is_enc_algo_downgrade(handle, 0, 0)) {
+          acl_set_disconnect_reason(HCI_ERR_HOST_REJECT_SECURITY);
+          btm_sec_send_hci_disconnect(p_device, HCI_ERR_AUTH_FAILURE, handle,
+                                      "attempted to downgrade from Secure Connections mode");
+          return;
+        }
+      }
     } else if (encr_enable == HCI_ENCRYPT_MODE_ON_BR_EDR_AES_CCM) {
       encryption_algo = EncryptionAlgorithm::AES;  // this is for BR/EDR
       if (transport == BT_TRANSPORT_LE) {
@@ -3527,7 +3539,9 @@ void btm_sec_encryption_change_evt(uint16_t handle, tHCI_STATUS status, uint8_t 
                                    uint8_t key_size, uint8_t mic_length, uint8_t key_sched_enabled,
                                    uint8_t key_sched_debug_flag) {
   if (status == HCI_SUCCESS && encr_enable != 0 && !BTM_IsBleConnection(handle)) {
-    if (key_size != 0) {
+    // Key size is negotiated every time for BR/EDR encryption, so we need it for reporting
+    // encryption change event further
+    if (key_size != 0) {  // Key size is already available, so no need to read it again
       read_encryption_key_size_complete_after_encryption_change(encr_enable, status, handle,
                                                                 key_size);
       return;
@@ -3538,6 +3552,13 @@ void btm_sec_encryption_change_evt(uint16_t handle, tHCI_STATUS status, uint8_t 
       btsnd_hcic_read_encryption_key_size(
               handle,
               base::Bind(&read_encryption_key_size_complete_after_encryption_change, encr_enable));
+
+      // CTKD request from the remote central device will get rejected if the link is "not"
+      // encrypted. So we should mark the link as encrypted immediately.
+      BtmDevice* p_device = btm_get_dev_by_handle(handle);
+      if (p_device != nullptr) {
+        p_device->sec_rec.set_device_encrypted();
+      }
       return;
     }
   }
